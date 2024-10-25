@@ -454,10 +454,18 @@ def process(
                     continue
                 boxes = []
                 for box in frame["boxes"]:
+                    # Keep original integer values
                     x1 = max(0, box["x1"])
                     y1 = max(0, box["y1"])
                     x2 = min(original_video_width, box["x2"])
                     y2 = min(original_video_height, box["y2"])
+                    
+                    # Calculate percentages
+                    x1_pct = x1 / original_video_width
+                    y1_pct = y1 / original_video_height
+                    x2_pct = x2 / original_video_width
+                    y2_pct = y2 / original_video_height
+
                     boxes.append(Box(
                         x1=x1,
                         y1=y1,
@@ -465,7 +473,14 @@ def process(
                         y2=y2,
                         confidence=1.0,
                         class_id=0,
-                        metadata={'raw_score': box['raw_score']},
+                        metadata={
+                            'raw_score': box['raw_score'],
+                            'x1_pct': x1_pct,
+                            'y1_pct': y1_pct,
+                            'x2_pct': x2_pct,
+                            'y2_pct': y2_pct,
+                            'timestamp': frame["frame_number"] / original_video_fps,
+                        },
                     ))
                 frames.append(Frame(
                     boxes=boxes,
@@ -530,12 +545,12 @@ def process(
             out_boxes = []
             for box in frame.boxes:
                 out_boxes.append({
-                    "x1": int(box.x1),
-                    "y1": int(box.y1),
-                    "x2": int(box.x2),
-                    "y2": int(box.y2),
+                    "x1": box.metadata["x1_pct"],
+                    "y1": box.metadata["y1_pct"],
+                    "x2": box.metadata["x2_pct"],
+                    "y2": box.metadata["y2_pct"],
                     "speaking_score": box.metadata["raw_score"],
-                    "active": box.metadata["raw_score"] > 0
+                    "active": box.metadata["raw_score"] > 0,
                 })
 
             # sort by box size
@@ -546,12 +561,14 @@ def process(
             if return_scene_data:
                 batch_frames.append({
                     "frame_number": frame.number,
+                    "timestamp": round(frame.number / fps * 1000),
                     "faces": out_boxes,
                     "related_scene": scene_out,
                 })
             else:
                 batch_frames.append({
                     "frame_number": frame.number,
+                    "timestamp": round(frame.number / fps * 1000),
                     "faces": out_boxes,
                 })
             if len(batch_frames) == 100:
