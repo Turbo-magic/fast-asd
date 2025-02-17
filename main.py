@@ -20,12 +20,12 @@ def push_video_segments_to_object_detection(video_segment, file, frame_interval=
         
         sample_box_output = object_detector.push(
             file,
-            confidence_threshold=0.7,
+            confidence_threshold=0.5,
             start_frame=start_frame,
             end_frame=end_frame,
             models=models,
             fps=processing_fps,
-            max_num_boxes=5,
+            max_num_boxes=3,
         )
 
         sampled_box_outputs.append({
@@ -100,7 +100,7 @@ def process(
     start_time: float = 0,
     end_time: float = -1,
     processing_fps: float = 2,
-    face_size_threshold: float = 0.5,
+    face_size_threshold: float = 0.4,
 ):
     '''
     :param file: The video file to process
@@ -127,7 +127,7 @@ def process(
     original_video_height = height
     original_video_length = get_video_length(file.path)
 
-    models = "yolov8l-face" if speed_boost else "yolov8n-face"
+    models = "yolov8l-face"
     if end_time == -1:
         end_time = original_video_length
 
@@ -391,7 +391,7 @@ def process(
                         confidence_threshold=0.7,
                         start_frame=future["start"], # start 10% into the segment to avoid scene boundaries
                         end_frame=future["end"],
-                        models="yolov8n, yolov8n-face" if speed_boost else "yolov8l, yolov8l-face",
+                        models="yolov8l, yolov8l-face",
                         fps=processing_fps,
                         max_num_boxes=30,
                     )
