@@ -69,7 +69,7 @@ metadata = sieve.Metadata(
 )
 
 @sieve.function(
-    name="active_speaker_detection",
+    name="active_speaker_detection-staging",
     python_version="3.9",
     metadata=metadata,
     python_packages=[
@@ -167,34 +167,103 @@ def process(
     scene_detection_thread = threading.Thread(target=scene_detection_wrapper, args=(file, scene_detection_result), kwargs={'adaptive_threshold': True})
     scene_detection_thread.start()
 
-    num_frames_to_process = (end_time - start_time) * original_video_fps
-    frame_interval = max(300, int(num_frames_to_process / 100))
-    object_detection_thread = threading.Thread(target=object_detection_wrapper, args=(original_video, file, object_detection_result, frame_interval))
-
-    object_detection_thread.start()
-    object_detection_thread.join()
-
     scene_detection_thread.join()
     scene_future = scene_detection_result.get()
 
     segments = create_video_segments(file, scene_future, start_time=start_time, end_time=end_time, fps=original_video_fps, original_video_length=original_video_length)
     total_num_frames = original_video.end_frame if original_video.end_frame else int(original_video.end * original_video_fps)
 
-    speaker_detection_futures = []
-    total_num_frames = original_video.end_frame if original_video.end_frame else int(original_video.end * original_video.fps())
-    start = original_video.start_frame if original_video.start_frame else int(original_video.start * original_video.fps())
-    for i in range(start, total_num_frames, frame_interval):
-        start_frame = i
-        end_frame = min(i + frame_interval - 1, total_num_frames - 1)
-        start = start_frame / original_video_fps
-        end = end_frame / original_video_fps            
-        speaker_detection_futures.append({
-            "future": None,
-            "start": start_frame,
-            "end": end_frame,
+    # Calculate all detection intervals first, before creating any futures
+    all_detection_intervals = []
+    for segment_index, segment in enumerate(segments):
+        start = segment.start
+        end = segment.end
+        scene_duration = end - start
+        
+        segment_intervals = []
+        
+        if scene_duration <= 5:
+            # For short scenes (<=5s), only detect at start (0-1s)
+            interval_start = start
+            interval_end = min(start + 1, end)
+            segment_intervals.append({
+                'start_time': interval_start,
+                'end_time': interval_end,
+                'start_frame': int(interval_start * original_video_fps),
+                'end_frame': int(interval_end * original_video_fps),
+                'segment_index': segment_index
+            })
+        else:
+            # For longer scenes, detect at start, middle, and end (each 1 second)
+            # Start: 0-1s
+            start_interval_start = start
+            start_interval_end = min(start + 1, end)
+            segment_intervals.append({
+                'start_time': start_interval_start,
+                'end_time': start_interval_end,
+                'start_frame': int(start_interval_start * original_video_fps),
+                'end_frame': int(start_interval_end * original_video_fps),
+                'segment_index': segment_index
+            })
+            
+            # Middle: around the middle 1 second
+            # middle_point = start + scene_duration / 2
+            # middle_start = max(start, middle_point - 0.5)
+            # middle_end = min(end, middle_point + 0.5)
+            # segment_intervals.append({
+            #     'start_time': middle_start,
+            #     'end_time': middle_end,
+            #     'start_frame': int(middle_start * original_video_fps),
+            #     'end_frame': int(middle_end * original_video_fps),
+            #     'segment_index': segment_index
+            # })
+            
+            # End: last 1 second
+            # end_start = max(start, end - 1)
+            # end_interval_end = end
+            # segment_intervals.append({
+            #     'start_time': end_start,
+            #     'end_time': end_interval_end,
+            #     'start_frame': int(end_start * original_video_fps),
+            #     'end_frame': int(end_interval_end * original_video_fps),
+            #     'segment_index': segment_index
+            # })
+        
+        all_detection_intervals.extend(segment_intervals)
+
+    # Create object detection futures only for our specific intervals
+    object_detection_futures = []
+    for interval in all_detection_intervals:
+        object_detector = sieve.function.get(OBJECT_DETECTION_MODEL)
+        future = object_detector.push(
+            file,
+            confidence_threshold=0.5,
+            start_frame=interval['start_frame'],
+            end_frame=interval['end_frame'],
+            models=models,
+            fps=processing_fps,
+            max_num_boxes=3,
+        )
+        object_detection_futures.append({
+            "future": future,
+            "start": interval['start_frame'],
+            "end": interval['end_frame'],
+            "start_time": interval['start_time'],
+            "end_time": interval['end_time'],
+            "segment_index": interval['segment_index']
         })
 
-    object_detection_futures = object_detection_result.get()
+    # Create speaker detection futures placeholders for our specific intervals
+    speaker_detection_futures = []
+    for interval in all_detection_intervals:
+        speaker_detection_futures.append({
+            "future": None,
+            "start": interval['start_frame'],
+            "end": interval['end_frame'],
+            "start_time": interval['start_time'],
+            "end_time": interval['end_time'],
+            "segment_index": interval['segment_index']
+        })
 
     def seconds_to_timecode(seconds):
         hours = int(seconds // 3600)
@@ -428,159 +497,129 @@ def process(
     print("Start Frame: ", start_frame)
     print("End Frame: ", end_frame)
     print("Number of Scenes: ", len(segments))
+    print(f"Number of Detection Intervals: {len(all_detection_intervals)}")
     print("------------------")
     print("Processing video...")
 
+    # Process each detection interval
     frame_count = 0
-    for segment_index, segment in enumerate(segments):
-        print(f"Processing scene {segment_index} [{segment.start:.2f}s - {segment.end:.2f}s] / {end_time:.2f}s")
-        start = segment.start
-        end = segment.end
-        fps = original_video_fps
-
-        if (segment.start_frame or segment.start_frame == 0) and segment.end_frame:
-            start_frame = segment.start_frame
-            end_frame = segment.end_frame - 1
-        else:
-            start_frame = int(start * fps)
-            end_frame = round(end * fps)
-
-        def get_frames():
-            speaker_payload = get_speaker_detection_payload(start_frame, end_frame, fps=fps)
-            frames = []
-            last_frame_number = None
-            for frame in speaker_payload:
-                if last_frame_number == frame["frame_number"]:
-                    continue
-                boxes = []
-                for box in frame["boxes"]:
-                    # Keep original integer values
-                    x1 = max(0, box["x1"])
-                    y1 = max(0, box["y1"])
-                    x2 = min(original_video_width, box["x2"])
-                    y2 = min(original_video_height, box["y2"])
-                    
-                    # Calculate percentages
-                    x1_pct = x1 / original_video_width
-                    y1_pct = y1 / original_video_height
-                    x2_pct = x2 / original_video_width
-                    y2_pct = y2 / original_video_height
-
-                    boxes.append(Box(
-                        x1=x1,
-                        y1=y1,
-                        x2=x2,
-                        y2=y2,
-                        confidence=1.0,
-                        class_id=0,
-                        metadata={
-                            'raw_score': box['raw_score'],
-                            'x1_pct': x1_pct,
-                            'y1_pct': y1_pct,
-                            'x2_pct': x2_pct,
-                            'y2_pct': y2_pct,
-                            'timestamp': frame["frame_number"] / original_video_fps,
-                        },
-                    ))
-                frames.append(Frame(
-                    boxes=boxes,
-                    number=frame["frame_number"],
-                    width=original_video_width,
-                    height=original_video_height,
-                ))
-                if len(frames) == 1 and frame["frame_number"] != start_frame:
-                    start_frame_boxes = frames[0].boxes
-                    num_start_to_add = frame["frame_number"] - start_frame
-                    first_frame_number = frame["frame_number"]
-                    for i in range(num_start_to_add):
-                        frames.insert(0, Frame(
-                            boxes=start_frame_boxes,
-                            number=first_frame_number - i - 1,
-                            width=original_video_width,
-                            height=original_video_height,
-                        ))
-                        for frame1 in frames:
-                            yield frame1                 
-                else:
-                    if last_frame_number and frames[-1].number - last_frame_number > 1:
-                        frame_to_add_back = frames[-1]
-                        frames = frames[:-1]
-                        for i in range(last_frame_number + 1, frame_to_add_back.number):
-                            frames.append(Frame(
-                                boxes=frame_to_add_back.boxes,
-                                number=i,
-                                width=original_video_width,
-                                height=original_video_height,
-                            ))
-                            yield frames[-1]
-                        frames.append(frame_to_add_back)
-                    yield frames[-1]
-                last_frame_number = frames[-1].number
-            if last_frame_number != end_frame:
-                end_frame_boxes = frames[-1].boxes
-                last_frame_number = frames[-1].number
-                num_end_to_add = end_frame - frame["frame_number"]
-                for i in range(num_end_to_add):
-                    frames.append(Frame(
-                        boxes=end_frame_boxes,
-                        number=last_frame_number + i + 1,
-                        width=original_video_width,
-                        height=original_video_height,
-                    ))
-                    yield frames[-1]
-
-        scene_out = {}
-        scene_out["start_seconds"] = start
-        scene_out["end_seconds"] = end
-        scene_out["start_frame"] = start_frame
-        scene_out["end_frame"] = end_frame
-        scene_out["start_timecode"] = seconds_to_timecode(start)
-        scene_out["end_timecode"] = seconds_to_timecode(end)
-        scene_out["scene_number"] = segment_index
-        refresh_futures()
+    for interval_idx, detection_interval in enumerate(all_detection_intervals):
+        segment_index = detection_interval['segment_index']
+        segment = segments[segment_index]
+        
+        print(f"Processing interval {interval_idx + 1}/{len(all_detection_intervals)} for scene {segment_index} [{detection_interval['start_time']:.2f}s - {detection_interval['end_time']:.2f}s]")
+        
+        # Wait for object detection to complete for this interval
+        while not object_detection_futures[interval_idx]["future"].done():
+            import time
+            time.sleep(0.1)
+        
+        try:
+            face_detection_result = list(object_detection_futures[interval_idx]["future"].result())
+        except Exception as e:
+            print(f"WARNING: Object detection failed for interval {interval_idx}, skipping...")
+            continue
+        
+        # Convert face detection to string format for speaker detection
+        if not face_detection_result:
+            print(f"No faces detected in interval {interval_idx}, skipping...")
+            continue
+            
+        face_detection_outputs = convert_face_detection_outputs_to_string(face_detection_result)
+        
+        # Create and run speaker detection for this interval
+        speaker_detection_future = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
+            file,
+            start_time=detection_interval['start_time'],
+            end_time=detection_interval['end_time'],
+            return_visualization=False,
+            face_boxes=face_detection_outputs,
+            in_memory_threshold=SPEAKER_DETECTION_IN_MEMORY_THRESHOLD
+        )
+        
+        # Wait for speaker detection to complete
+        while not speaker_detection_future.done():
+            import time
+            time.sleep(0.1)
+        
+        try:
+            speaker_detection_result = list(speaker_detection_future.result())
+        except Exception as e:
+            print(f"WARNING: Speaker detection failed for interval {interval_idx}, skipping...")
+            continue
+        
+        # Process the results for this interval
         batch_frames = []
-        for i, frame in enumerate(get_frames()):
-            if not (start_frame <= frame.number <= end_frame):
-                continue
-            out_boxes = []
-            for box in frame.boxes:
-                out_boxes.append({
-                    "x1": box.metadata["x1_pct"],
-                    "y1": box.metadata["y1_pct"],
-                    "x2": box.metadata["x2_pct"],
-                    "y2": box.metadata["y2_pct"],
-                    "speaking_score": box.metadata["raw_score"],
-                    "active": box.metadata["raw_score"] > 0,
+        
+        for frame in speaker_detection_result:
+            frame_number = frame["frame_number"]
+            boxes = []
+            
+            for box in frame["boxes"]:
+                # Keep original integer values
+                x1 = max(0, box["x1"])
+                y1 = max(0, box["y1"])
+                x2 = min(original_video_width, box["x2"])
+                y2 = min(original_video_height, box["y2"])
+                
+                # Calculate percentages
+                x1_pct = x1 / original_video_width
+                y1_pct = y1 / original_video_height
+                x2_pct = x2 / original_video_width
+                y2_pct = y2 / original_video_height
+
+                boxes.append({
+                    "x1": x1_pct,
+                    "y1": y1_pct,
+                    "x2": x2_pct,
+                    "y2": y2_pct,
+                    "speaking_score": box['raw_score'],
+                    "active": box['raw_score'] > 0,
                 })
 
-            # sort by box size
-            out_boxes = sorted(out_boxes, key=lambda x: (x['x2'] - x['x1']) * (x['y2'] - x['y1']), reverse=True)
-            # keep the max_num_faces largest boxes
-            if len(out_boxes) > max_num_faces:
-                out_boxes = out_boxes[:max_num_faces]
+            # Sort by box size and keep only max_num_faces
+            boxes = sorted(boxes, key=lambda x: (x['x2'] - x['x1']) * (x['y2'] - x['y1']), reverse=True)
+            if len(boxes) > max_num_faces:
+                boxes = boxes[:max_num_faces]
+            
+            # Create scene output data
+            scene_out = {
+                "start_seconds": segment.start,
+                "end_seconds": segment.end,
+                "start_frame": segment.start_frame if segment.start_frame else int(segment.start * original_video_fps),
+                "end_frame": segment.end_frame if segment.end_frame else int(segment.end * original_video_fps),
+                "start_timecode": seconds_to_timecode(segment.start),
+                "end_timecode": seconds_to_timecode(segment.end),
+                "scene_number": segment_index,
+            }
+            
             if return_scene_data:
                 batch_frames.append({
-                    "frame_number": frame.number,
-                    "timestamp": round(frame.number / fps * 1000),
-                    "faces": out_boxes,
+                    "frame_number": frame_number,
+                    "timestamp": round(frame_number / original_video_fps * 1000),
+                    "faces": boxes,
                     "related_scene": scene_out,
                 })
             else:
                 batch_frames.append({
-                    "frame_number": frame.number,
-                    "timestamp": round(frame.number / fps * 1000),
-                    "faces": out_boxes,
+                    "frame_number": frame_number,
+                    "timestamp": round(frame_number / original_video_fps * 1000),
+                    "faces": boxes,
                 })
+            
             if len(batch_frames) == 100:
                 yield batch_frames
                 batch_frames = []
+            
             if return_scene_cuts_only:
                 yield batch_frames
                 break
+            
             frame_count += 1
+        
         if not return_scene_cuts_only and batch_frames:
             yield batch_frames
-        
+
 if __name__ == "__main__":
     TEST_URL = "https://storage.googleapis.com/sieve-prod-us-central1-public-file-upload-bucket/d979a930-f2a5-4e0d-84fe-a9b233985c4e/dba9cbf3-8374-44bc-8d9d-cc9833d3f502-input-file.mp4"
     # change "url" to "path" if you want to test with a local file
