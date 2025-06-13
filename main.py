@@ -501,8 +501,25 @@ def process(
     print("------------------")
     print("Processing video...")
 
+    # Prepare scene detections output
+    shots = []
+    for segment_index, segment in enumerate(segments):
+        shots.append({
+            "startTimestamp": round(segment.start * 1000),
+            "endTimestamp": round(segment.end * 1000),
+            "startFrame": segment.start_frame if segment.start_frame else int(segment.start * original_video_fps),
+            "endFrame": (segment.end_frame if segment.end_frame else int(segment.end * original_video_fps)) - 1,
+            "shotSegment": {
+                "Confidence": 99.91699981689453,  # This is a placeholder value
+                "Index": segment_index
+            },
+            "type": "SHOT"
+        })
+
     # Process each detection interval
     frame_count = 0
+    faces = []
+    
     for interval_idx, detection_interval in enumerate(all_detection_intervals):
         segment_index = detection_interval['segment_index']
         segment = segments[segment_index]
@@ -549,8 +566,6 @@ def process(
             continue
         
         # Process the results for this interval
-        batch_frames = []
-        
         for frame in speaker_detection_result:
             frame_number = frame["frame_number"]
             boxes = []
@@ -582,43 +597,20 @@ def process(
             if len(boxes) > max_num_faces:
                 boxes = boxes[:max_num_faces]
             
-            # Create scene output data
-            scene_out = {
-                "start_seconds": segment.start,
-                "end_seconds": segment.end,
-                "start_frame": segment.start_frame if segment.start_frame else int(segment.start * original_video_fps),
-                "end_frame": segment.end_frame if segment.end_frame else int(segment.end * original_video_fps),
-                "start_timecode": seconds_to_timecode(segment.start),
-                "end_timecode": seconds_to_timecode(segment.end),
-                "scene_number": segment_index,
-            }
-            
-            if return_scene_data:
-                batch_frames.append({
-                    "frame_number": frame_number,
-                    "timestamp": round(frame_number / original_video_fps * 1000),
-                    "faces": boxes,
-                    "related_scene": scene_out,
-                })
-            else:
-                batch_frames.append({
-                    "frame_number": frame_number,
-                    "timestamp": round(frame_number / original_video_fps * 1000),
-                    "faces": boxes,
-                })
-            
-            if len(batch_frames) == 100:
-                yield batch_frames
-                batch_frames = []
-            
-            if return_scene_cuts_only:
-                yield batch_frames
-                break
+            faces.append({
+                "frame_number": frame_number,
+                "timestamp": round(frame_number / original_video_fps * 1000),
+                "faces": boxes,
+                "scene_number": segment_index
+            })
             
             frame_count += 1
-        
-        if not return_scene_cuts_only and batch_frames:
-            yield batch_frames
+    
+    # Return the combined results
+    yield {
+        "shots": shots,
+        "faces": faces
+    }
 
 if __name__ == "__main__":
     TEST_URL = "https://storage.googleapis.com/sieve-prod-us-central1-public-file-upload-bucket/d979a930-f2a5-4e0d-84fe-a9b233985c4e/dba9cbf3-8374-44bc-8d9d-cc9833d3f502-input-file.mp4"
