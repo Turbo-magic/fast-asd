@@ -253,7 +253,7 @@ def process(
             "segment_index": interval['segment_index']
         })
 
-    # Create speaker detection futures placeholders for our specific intervals
+    # Create speaker detection futures in parallel
     speaker_detection_futures = []
     for interval in all_detection_intervals:
         speaker_detection_futures.append({
@@ -363,24 +363,6 @@ def process(
     
     def get_speaker_detection_payload(start, end, fps=30):
         # find all indices that contain the start and end
-        def refresh_speakers():
-            for i, future in enumerate(speaker_detection_futures):
-                in_range = (start >= future["start"] and start <= future["end"]) or (end >= future["start"] and end <= future["end"]) or (start <= future["start"] and end >= future["end"])
-                relevant_future_done = object_detection_futures[i]["future"].done()
-                if not future["future"] and (in_range or relevant_future_done):
-                    # this means that we haven't pushed the video to speaker detection yet since face detection is not done
-                    # lets find the relevant face detection future, wait for it to be done, and then push the video to speaker detection
-                    res = list(get_relevant_face_detection_future(i))
-                    face_detection_outputs = convert_face_detection_outputs_to_string(res)
-                    speaker_detection_futures[i]["future"] = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
-                        file,
-                        start_time=future["start"] / fps, # start 10% into the segment to avoid scene boundaries
-                        end_time=future["end"] / fps,
-                        return_visualization=False,
-                        face_boxes=face_detection_outputs,
-                        in_memory_threshold=SPEAKER_DETECTION_IN_MEMORY_THRESHOLD
-                    )
-        refresh_speakers()
         for i, future in enumerate(speaker_detection_futures):
             if (start >= future["start"] and start <= future["end"]) or (end >= future["start"] and end <= future["end"]) or (start <= future["start"] and end >= future["end"]):
                 for _ in range(10):  # retry up to 10 times
@@ -389,7 +371,6 @@ def process(
                             while not speaker_detection_futures[i]["future"].done():
                                 import time
                                 time.sleep(0.1)
-                                refresh_speakers()
                             speaker_detection_futures[i]["result"] = list(speaker_detection_futures[i]["future"].result())
                         break  # if successful, break the retry loop
                     except Exception as e:
@@ -397,12 +378,11 @@ def process(
                         if "result" in speaker_detection_futures[i]:
                             del speaker_detection_futures[i]["result"]
                         # recreate the future
-
                         res = list(get_relevant_face_detection_future(i))
                         face_detection_outputs = convert_face_detection_outputs_to_string(res)
                         speaker_detection_futures[i]["future"] = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
                             file,
-                            start_time=future["start"] / fps, # start 10% into the segment to avoid scene boundaries
+                            start_time=future["start"] / fps,
                             end_time=future["end"] / fps,
                             return_visualization=False,
                             face_boxes=face_detection_outputs,
@@ -423,7 +403,7 @@ def process(
                 face_detection_outputs = convert_face_detection_outputs_to_string(res)
                 speaker_detection_futures[i]["future"] = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
                     file,
-                    start_time=future["start"] / fps, # start 10% into the segment to avoid scene boundaries
+                    start_time=future["start"] / fps,
                     end_time=future["end"] / fps,
                     return_visualization=False,
                     face_boxes=face_detection_outputs,
@@ -520,12 +500,8 @@ def process(
     frame_count = 0
     faces = []
     
+    # First, create all speaker detection futures in parallel
     for interval_idx, detection_interval in enumerate(all_detection_intervals):
-        segment_index = detection_interval['segment_index']
-        segment = segments[segment_index]
-        
-        print(f"Processing interval {interval_idx + 1}/{len(all_detection_intervals)} for scene {segment_index} [{detection_interval['start_time']:.2f}s - {detection_interval['end_time']:.2f}s]")
-        
         # Wait for object detection to complete for this interval
         while not object_detection_futures[interval_idx]["future"].done():
             import time
@@ -544,8 +520,8 @@ def process(
             
         face_detection_outputs = convert_face_detection_outputs_to_string(face_detection_result)
         
-        # Create and run speaker detection for this interval
-        speaker_detection_future = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
+        # Create speaker detection future for this interval
+        speaker_detection_futures[interval_idx]["future"] = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
             file,
             start_time=detection_interval['start_time'],
             end_time=detection_interval['end_time'],
@@ -553,14 +529,21 @@ def process(
             face_boxes=face_detection_outputs,
             in_memory_threshold=SPEAKER_DETECTION_IN_MEMORY_THRESHOLD
         )
+    
+    # Then process the results
+    for interval_idx, detection_interval in enumerate(all_detection_intervals):
+        segment_index = detection_interval['segment_index']
+        segment = segments[segment_index]
+        
+        print(f"Processing interval {interval_idx + 1}/{len(all_detection_intervals)} for scene {segment_index} [{detection_interval['start_time']:.2f}s - {detection_interval['end_time']:.2f}s]")
         
         # Wait for speaker detection to complete
-        while not speaker_detection_future.done():
+        while not speaker_detection_futures[interval_idx]["future"].done():
             import time
             time.sleep(0.1)
         
         try:
-            speaker_detection_result = list(speaker_detection_future.result())
+            speaker_detection_result = list(speaker_detection_futures[interval_idx]["future"].result())
         except Exception as e:
             print(f"WARNING: Speaker detection failed for interval {interval_idx}, skipping...")
             continue
