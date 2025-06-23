@@ -37,7 +37,7 @@ def scene_detection(
     if adaptive_threshold:
         scene_manager.add_detector(AdaptiveDetector())
     else:
-        scene_manager.add_detector(ContentDetector(threshold=threshold))
+        scene_manager.add_detector(ContentDetector(threshold=threshold, min_scene_len=15))
 
     base_timecode = video_manager.get_base_timecode()
     video_manager.set_downscale_factor()

@@ -164,7 +164,7 @@ def process(
         result_queue.put(result)
         print("Done pushing video to object detection")
     
-    scene_detection_thread = threading.Thread(target=scene_detection_wrapper, args=(file, scene_detection_result), kwargs={'adaptive_threshold': True})
+    scene_detection_thread = threading.Thread(target=scene_detection_wrapper, args=(file, scene_detection_result), kwargs={'threshold': 15.0})
     scene_detection_thread.start()
 
     scene_detection_thread.join()
