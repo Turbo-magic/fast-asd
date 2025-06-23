@@ -121,6 +121,17 @@ def process(
         new_path = file.path.replace(".webm", ".mp4")
         subprocess.run(["ffmpeg", "-y", "-i", file.path, "-c", "copy", new_path])
         file = sieve.File(path=new_path)
+    
+    # handle files without extensions by adding .mp4 extension
+    if not any(file.path.endswith(ext) for ext in ['.mp4', '.avi', '.mov', '.flv', '.mkv', '.wmv', '.mpg', '.mpeg', '.m4v', '.webm', '.jpg', '.jpeg', '.png', '.bmp', '.tiff']):
+        print("Adding .mp4 extension to file without extension...")
+        import os
+        new_path = file.path + ".mp4"
+        # Create a symbolic link or copy the file with the new name
+        if not os.path.exists(new_path):
+            import shutil
+            shutil.copy2(file.path, new_path)
+        file = sieve.File(path=new_path)
 
     width, height = get_video_dimensions(file.path)
     original_video_width = width
