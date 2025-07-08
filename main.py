@@ -69,7 +69,7 @@ metadata = sieve.Metadata(
 )
 
 @sieve.function(
-    name="active_speaker_detection-staging",
+    name="active_speaker_detection",
     python_version="3.9",
     metadata=metadata,
     python_packages=[
@@ -184,73 +184,65 @@ def process(
     segments = create_video_segments(file, scene_future, start_time=start_time, end_time=end_time, fps=original_video_fps, original_video_length=original_video_length)
     total_num_frames = original_video.end_frame if original_video.end_frame else int(original_video.end * original_video_fps)
 
-    # Calculate all detection intervals first, before creating any futures
-    all_detection_intervals = []
+    # Calculate detection intervals - completely separate face detection from speaker detection
+    # Face detection: 1 frame every second (the first frame of each second, regardless of scene)
+    # Speaker detection: only first second of each scene
+    
+    face_detection_intervals = []
+    speaker_detection_intervals = []
+    
+    # Face detection: every second throughout the entire video (not per scene)
+    current_time = start_time
+    while current_time < end_time:
+        # Detect only the first frame of each second
+        frame_time = current_time
+        start_frame = int(frame_time * original_video_fps)
+        end_frame = start_frame  # Only one frame
+        
+        face_detection_intervals.append({
+            'start_time': frame_time,
+            'end_time': frame_time,
+            'start_frame': start_frame,
+            'end_frame': end_frame,
+            'segment_index': -1,  # Not tied to any specific scene
+            'type': 'face'
+        })
+        
+        current_time += 1  # Move to next second
+    
+    # Speaker detection: only first second of each scene
     for segment_index, segment in enumerate(segments):
         start = segment.start
         end = segment.end
-        scene_duration = end - start
         
-        segment_intervals = []
-        
-        if scene_duration <= 5:
-            # For short scenes (<=5s), only detect at start (0-1s)
-            interval_start = start
-            interval_end = min(start + 1, end)
-            segment_intervals.append({
-                'start_time': interval_start,
-                'end_time': interval_end,
-                'start_frame': int(interval_start * original_video_fps),
-                'end_frame': int(interval_end * original_video_fps),
-                'segment_index': segment_index
-            })
-        else:
-            # For longer scenes, detect at start, middle, and end (each 1 second)
-            # Start: 0-1s
-            start_interval_start = start
-            start_interval_end = min(start + 1, end)
-            segment_intervals.append({
-                'start_time': start_interval_start,
-                'end_time': start_interval_end,
-                'start_frame': int(start_interval_start * original_video_fps),
-                'end_frame': int(start_interval_end * original_video_fps),
-                'segment_index': segment_index
-            })
-            
-            # Middle: around the middle 1 second
-            # middle_point = start + scene_duration / 2
-            # middle_start = max(start, middle_point - 0.5)
-            # middle_end = min(end, middle_point + 0.5)
-            # segment_intervals.append({
-            #     'start_time': middle_start,
-            #     'end_time': middle_end,
-            #     'start_frame': int(middle_start * original_video_fps),
-            #     'end_frame': int(middle_end * original_video_fps),
-            #     'segment_index': segment_index
-            # })
-            
-            # End: last 1 second
-            # end_start = max(start, end - 1)
-            # end_interval_end = end
-            # segment_intervals.append({
-            #     'start_time': end_start,
-            #     'end_time': end_interval_end,
-            #     'start_frame': int(end_start * original_video_fps),
-            #     'end_frame': int(end_interval_end * original_video_fps),
-            #     'segment_index': segment_index
-            # })
-        
-        all_detection_intervals.extend(segment_intervals)
+        # Speaker detection: only first second of each scene
+        speaker_interval_start = start
+        speaker_interval_end = min(start + 1, end)
+        speaker_detection_intervals.append({
+            'start_time': speaker_interval_start,
+            'end_time': speaker_interval_end,
+            'start_frame': int(speaker_interval_start * original_video_fps),
+            'end_frame': int(speaker_interval_end * original_video_fps),
+            'segment_index': segment_index,
+            'type': 'speaker'
+        })
+    
+    # Combine all intervals for processing
+    all_detection_intervals = face_detection_intervals + speaker_detection_intervals
 
-    # Create object detection futures only for our specific intervals
+    # Create object detection futures only for face detection intervals
     object_detection_futures = []
-    for interval in all_detection_intervals:
+    for interval in face_detection_intervals:
         object_detector = sieve.function.get(OBJECT_DETECTION_MODEL)
+        # Use a small interval around the target frame to ensure we capture it
+        target_frame = interval['start_frame']
+        start_frame = max(0, target_frame - 1)
+        end_frame = target_frame + 1
         future = object_detector.push(
             file,
             confidence_threshold=0.5,
-            start_frame=interval['start_frame'],
-            end_frame=interval['end_frame'],
+            start_frame=start_frame,
+            end_frame=end_frame,
             models=models,
             fps=processing_fps,
             max_num_boxes=3,
@@ -261,14 +253,25 @@ def process(
             "end": interval['end_frame'],
             "start_time": interval['start_time'],
             "end_time": interval['end_time'],
-            "segment_index": interval['segment_index']
+            "segment_index": interval['segment_index'],
+            "type": interval['type']
         })
 
-    # Create speaker detection futures in parallel
+    # Create speaker detection futures for the first second of each scene (no face_boxes)
     speaker_detection_futures = []
-    for interval in all_detection_intervals:
+    for interval in speaker_detection_intervals:
+        print(f"Calling TalkNet-ASD with:")
+        print(f"  - start_time: {interval['start_time']}")
+        print(f"  - end_time: {interval['end_time']}")
+        print(f"  - No face_boxes provided (TalkNet-ASD will detect faces automatically)")
         speaker_detection_futures.append({
-            "future": None,
+            "future": sieve.function.get(SPEAKER_DETECTION_MODEL).push(
+                file,
+                start_time=interval['start_time'],
+                end_time=interval['end_time'],
+                return_visualization=False,
+                in_memory_threshold=SPEAKER_DETECTION_IN_MEMORY_THRESHOLD
+            ),
             "start": interval['start_frame'],
             "end": interval['end_frame'],
             "start_time": interval['start_time'],
@@ -317,7 +320,7 @@ def process(
             # onyl keep the face boxes that are greater than 1/50 of the frame size
             for box in frame['boxes']:
                 box_area = (box['x2'] - box['x1']) * (box['y2'] - box['y1'])
-                if box_area > (face_size_threshold / 100) * frame_size and box['confidence'] > 0.5:
+                if box_area > (face_size_threshold / 200) * frame_size and box['confidence'] > 0.3:
                     new_boxes.append(box)
             for box in new_boxes:
                 if box['class_name'] != "face":
@@ -414,8 +417,8 @@ def process(
                 face_detection_outputs = convert_face_detection_outputs_to_string(res)
                 speaker_detection_futures[i]["future"] = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
                     file,
-                    start_time=future["start"] / fps,
-                    end_time=future["end"] / fps,
+                    start_time=future["start"] / original_video_fps,
+                    end_time=future["end"] / original_video_fps,
                     return_visualization=False,
                     face_boxes=face_detection_outputs,
                     in_memory_threshold=SPEAKER_DETECTION_IN_MEMORY_THRESHOLD
@@ -431,8 +434,8 @@ def process(
                     face_detection_outputs = convert_face_detection_outputs_to_string(res)
                     speaker_detection_futures[i]["future"] = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
                         file,
-                        start_time=future["start"] / fps, # start 10% into the segment to avoid scene boundaries
-                        end_time=future["end"] / fps,
+                        start_time=future["start"] / original_video_fps, # start 10% into the segment to avoid scene boundaries
+                        end_time=future["end"] / original_video_fps,
                         return_visualization=False,
                         face_boxes=face_detection_outputs,
                         in_memory_threshold=SPEAKER_DETECTION_IN_MEMORY_THRESHOLD
@@ -469,8 +472,8 @@ def process(
                     face_detection_outputs = convert_face_detection_outputs_to_string(res)
                     speaker_detection_futures[i]["future"] = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
                         file,
-                        start_time=future["start"] / fps,
-                        end_time=future["end"] / fps,
+                        start_time=future["start"] / original_video_fps,
+                        end_time=future["end"] / original_video_fps,
                         return_visualization=False,
                         face_boxes=face_detection_outputs,
                         in_memory_threshold=SPEAKER_DETECTION_IN_MEMORY_THRESHOLD
@@ -488,7 +491,9 @@ def process(
     print("Start Frame: ", start_frame)
     print("End Frame: ", end_frame)
     print("Number of Scenes: ", len(segments))
-    print(f"Number of Detection Intervals: {len(all_detection_intervals)}")
+    print(f"Number of Face Detection Intervals: {len(face_detection_intervals)}")
+    print(f"Number of Speaker Detection Intervals: {len(speaker_detection_intervals)}")
+    print(f"Total Detection Intervals: {len(all_detection_intervals)}")
     print("------------------")
     print("Processing video...")
 
@@ -507,103 +512,244 @@ def process(
             "type": "SHOT"
         })
 
-    # Process each detection interval
-    frame_count = 0
-    faces = []
+    # Create speaker detection futures for the first second of each scene
+    print(f"Creating speaker detection futures for {len(speaker_detection_intervals)} intervals...")
     
-    # First, create all speaker detection futures in parallel
-    for interval_idx, detection_interval in enumerate(all_detection_intervals):
-        # Wait for object detection to complete for this interval
-        while not object_detection_futures[interval_idx]["future"].done():
-            import time
-            time.sleep(0.1)
+    for speaker_idx, speaker_interval in enumerate(speaker_detection_intervals):
+        segment_index = speaker_interval['segment_index']
         
-        try:
-            face_detection_result = list(object_detection_futures[interval_idx]["future"].result())
-        except Exception as e:
-            print(f"WARNING: Object detection failed for interval {interval_idx}, skipping...")
-            continue
+        print(f"Creating speaker detection {speaker_idx + 1}/{len(speaker_detection_intervals)} for scene {segment_index} [{speaker_interval['start_time']:.2f}s - {speaker_interval['end_time']:.2f}s]")
         
-        # Convert face detection to string format for speaker detection
-        if not face_detection_result:
-            print(f"No faces detected in interval {interval_idx}, skipping...")
-            continue
-            
-        face_detection_outputs = convert_face_detection_outputs_to_string(face_detection_result)
+        # Create speaker detection future for this interval (without face data)
+        print(f"Calling TalkNet-ASD with:")
+        print(f"  - start_time: {speaker_interval['start_time']}")
+        print(f"  - end_time: {speaker_interval['end_time']}")
+        print(f"  - No face_boxes provided (TalkNet-ASD will detect faces automatically)")
         
-        # Create speaker detection future for this interval
-        speaker_detection_futures[interval_idx]["future"] = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
+        speaker_detection_futures[speaker_idx]["future"] = sieve.function.get(SPEAKER_DETECTION_MODEL).push(
             file,
-            start_time=detection_interval['start_time'],
-            end_time=detection_interval['end_time'],
+            start_time=speaker_interval['start_time'],
+            end_time=speaker_interval['end_time'],
             return_visualization=False,
-            face_boxes=face_detection_outputs,
             in_memory_threshold=SPEAKER_DETECTION_IN_MEMORY_THRESHOLD
         )
+        print(f"Created speaker detection future for interval {speaker_idx}")
     
-    # Then process the results
-    for interval_idx, detection_interval in enumerate(all_detection_intervals):
-        segment_index = detection_interval['segment_index']
-        segment = segments[segment_index]
+    # Process face detection results (every second) to get face positions
+    faces = []
+    print(f"Processing {len(face_detection_intervals)} face detection intervals...")
+    
+    for face_idx, face_interval in enumerate(face_detection_intervals):
+        print(f"Processing face detection {face_idx + 1}/{len(face_detection_intervals)} at {face_interval['start_time']:.2f}s")
         
-        print(f"Processing interval {interval_idx + 1}/{len(all_detection_intervals)} for scene {segment_index} [{detection_interval['start_time']:.2f}s - {detection_interval['end_time']:.2f}s]")
+        try:
+            face_detection_result = list(object_detection_futures[face_idx]["future"].result())
+        except Exception as e:
+            print(f"WARNING: Face detection failed for face interval {face_idx}, skipping...")
+            continue
         
+        # Process face detection results
+        if face_interval['type'] == 'face':
+            # For regular face detection, only process the target frame
+            target_frame = face_interval['start_frame']
+            
+            for frame in face_detection_result:
+                frame_number = frame["frame_number"]
+                
+                # Only process the target frame (the frame we actually want)
+                if frame_number != target_frame:
+                    continue
+                    
+                face_boxes = []
+                
+                print(f"Frame {frame_number} has {len(frame['boxes'])} boxes")
+                for box in frame["boxes"]:
+                    print(f"Box: class={box.get('class_name')}, confidence={box.get('confidence')}")
+                    # Only process face boxes with reasonable confidence
+                    if box.get('class_name') != 'face':
+                        continue
+                    if box.get('confidence', 0) <= 0.3:  # Lowered threshold
+                        continue
+                        
+                    # Keep original integer values
+                    x1 = max(0, box["x1"])
+                    y1 = max(0, box["y1"])
+                    x2 = min(original_video_width, box["x2"])
+                    y2 = min(original_video_height, box["y2"])
+                    
+                    # Calculate percentages
+                    x1_pct = x1 / original_video_width
+                    y1_pct = y1 / original_video_height
+                    x2_pct = x2 / original_video_width
+                    y2_pct = y2 / original_video_height
+                    
+                    face_boxes.append({
+                        "x1": x1_pct,
+                        "y1": y1_pct,
+                        "x2": x2_pct,
+                        "y2": y2_pct,
+                        "confidence": box.get('confidence', 0),
+                    })
+                
+                # Sort by box size and keep only max_num_faces
+                face_boxes = sorted(face_boxes, key=lambda x: (x['x2'] - x['x1']) * (x['y2'] - x['y1']), reverse=True)
+                if len(face_boxes) > max_num_faces:
+                    face_boxes = face_boxes[:max_num_faces]
+                
+                if face_boxes:  # Only add if we have faces
+                    # Determine which scene this frame belongs to
+                    scene_number = -1
+                    for seg_idx, segment in enumerate(segments):
+                        if (frame_number / original_video_fps >= segment.start and 
+                            frame_number / original_video_fps < segment.end):
+                            scene_number = seg_idx
+                            break
+                    
+                    faces.append({
+                        "frame_number": frame_number,
+                        "timestamp": round(frame_number / original_video_fps * 1000),
+                        "faces": face_boxes,
+                        "scene_number": scene_number
+                    })
+                    break  # We found our target frame, no need to process more
+        else:
+            # For speaker_face detection, process all frames in the interval
+            for frame in face_detection_result:
+                frame_number = frame["frame_number"]
+                
+                face_boxes = []
+                
+                print(f"Speaker face frame {frame_number} has {len(frame['boxes'])} boxes")
+                for box in frame["boxes"]:
+                    print(f"Box: class={box.get('class_name')}, confidence={box.get('confidence')}")
+                    # Only process face boxes with reasonable confidence
+                    if box.get('class_name') != 'face':
+                        continue
+                    if box.get('confidence', 0) <= 0.3:  # Lowered threshold
+                        continue
+                        
+                    # Keep original integer values
+                    x1 = max(0, box["x1"])
+                    y1 = max(0, box["y1"])
+                    x2 = min(original_video_width, box["x2"])
+                    y2 = min(original_video_height, box["y2"])
+                    
+                    # Calculate percentages
+                    x1_pct = x1 / original_video_width
+                    y1_pct = y1 / original_video_height
+                    x2_pct = x2 / original_video_width
+                    y2_pct = y2 / original_video_height
+                    
+                    face_boxes.append({
+                        "x1": x1_pct,
+                        "y1": y1_pct,
+                        "x2": x2_pct,
+                        "y2": y2_pct,
+                        "confidence": box.get('confidence', 0),
+                    })
+                
+                # Sort by box size and keep only max_num_faces
+                face_boxes = sorted(face_boxes, key=lambda x: (x['x2'] - x['x1']) * (x['y2'] - x['y1']), reverse=True)
+                if len(face_boxes) > max_num_faces:
+                    face_boxes = face_boxes[:max_num_faces]
+                
+
+    
+    # Process speaker detection results (first second of each scene)
+    speakers = []
+    print(f"Processing {len(speaker_detection_intervals)} speaker detection intervals...")
+    
+    for speaker_idx, speaker_interval in enumerate(speaker_detection_intervals):
+        segment_index = speaker_interval['segment_index']
+        
+        print(f"Processing speaker detection {speaker_idx + 1}/{len(speaker_detection_intervals)} for scene {segment_index} [{speaker_interval['start_time']:.2f}s - {speaker_interval['end_time']:.2f}s]")
+        
+        if speaker_detection_futures[speaker_idx]["future"] is None:
+            print(f"WARNING: No speaker detection future for interval {speaker_idx}, skipping...")
+            continue
+            
         # Wait for speaker detection to complete
-        while not speaker_detection_futures[interval_idx]["future"].done():
+        while not speaker_detection_futures[speaker_idx]["future"].done():
             import time
             time.sleep(0.1)
         
         try:
-            speaker_detection_result = list(speaker_detection_futures[interval_idx]["future"].result())
+            speaker_detection_result = list(speaker_detection_futures[speaker_idx]["future"].result())
+            print(f"Speaker detection {speaker_idx} completed with {len(speaker_detection_result)} frames")
+            
+            # Debug: Print the first few frames to understand the structure
+            if speaker_detection_result:
+                print(f"First frame structure: {speaker_detection_result[0]}")
+                if len(speaker_detection_result) > 1:
+                    print(f"Second frame structure: {speaker_detection_result[1]}")
         except Exception as e:
-            print(f"WARNING: Speaker detection failed for interval {interval_idx}, skipping...")
+            print(f"WARNING: Speaker detection failed for speaker interval {speaker_idx}: {e}")
             continue
         
-        # Process the results for this interval
+        # Process speaker detection results
         for frame in speaker_detection_result:
             frame_number = frame["frame_number"]
-            boxes = []
+            speaker_boxes = []
             
-            for box in frame["boxes"]:
-                # Keep original integer values
-                x1 = max(0, box["x1"])
-                y1 = max(0, box["y1"])
-                x2 = min(original_video_width, box["x2"])
-                y2 = min(original_video_height, box["y2"])
+            print(f"Processing speaker frame {frame_number} with {len(frame.get('boxes', []))} boxes")
+            
+            # Handle different possible response formats from TalkNet-ASD
+            boxes = frame.get('boxes', [])
+            if not boxes:
+                print(f"No boxes found in speaker frame {frame_number}")
+                continue
                 
-                # Calculate percentages
-                x1_pct = x1 / original_video_width
-                y1_pct = y1 / original_video_height
-                x2_pct = x2 / original_video_width
-                y2_pct = y2 / original_video_height
-
-                boxes.append({
-                    "x1": x1_pct,
-                    "y1": y1_pct,
-                    "x2": x2_pct,
-                    "y2": y2_pct,
-                    "speaking_score": box['raw_score'],
-                    "active": box['raw_score'] > 0,
-                })
-
+            for box in boxes:
+                # Handle different possible box formats
+                if isinstance(box, dict):
+                    # Standard box format
+                    x1 = max(0, box.get("x1", 0))
+                    y1 = max(0, box.get("y1", 0))
+                    x2 = min(original_video_width, box.get("x2", 0))
+                    y2 = min(original_video_height, box.get("y2", 0))
+                    
+                    # Get speaking score from various possible fields
+                    speaking_score = box.get('raw_score', box.get('score', box.get('speaking_score', 0)))
+                    
+                    # Calculate percentages
+                    x1_pct = x1 / original_video_width
+                    y1_pct = y1 / original_video_height
+                    x2_pct = x2 / original_video_width
+                    y2_pct = y2 / original_video_height
+                    
+                    speaker_boxes.append({
+                        "x1": x1_pct,
+                        "y1": y1_pct,
+                        "x2": x2_pct,
+                        "y2": y2_pct,
+                        "speaking_score": speaking_score,
+                        "active": speaking_score > 0,
+                    })
+                else:
+                    print(f"Unexpected box format: {type(box)} - {box}")
+                    continue
+            
             # Sort by box size and keep only max_num_faces
-            boxes = sorted(boxes, key=lambda x: (x['x2'] - x['x1']) * (x['y2'] - x['y1']), reverse=True)
-            if len(boxes) > max_num_faces:
-                boxes = boxes[:max_num_faces]
+            speaker_boxes = sorted(speaker_boxes, key=lambda x: (x['x2'] - x['x1']) * (x['y2'] - x['y1']), reverse=True)
+            if len(speaker_boxes) > max_num_faces:
+                speaker_boxes = speaker_boxes[:max_num_faces]
             
-            faces.append({
-                "frame_number": frame_number,
-                "timestamp": round(frame_number / original_video_fps * 1000),
-                "faces": boxes,
-                "scene_number": segment_index
-            })
-            
-            frame_count += 1
+            if speaker_boxes:  # Only add if we have speakers
+                speakers.append({
+                    "frame_number": frame_number,
+                    "timestamp": round(frame_number / original_video_fps * 1000),
+                    "speakers": speaker_boxes,
+                    "scene_number": segment_index
+                })
+                print(f"Added {len(speaker_boxes)} speakers for frame {frame_number}")
+            else:
+                print(f"No valid speakers found for frame {frame_number}")
     
-    # Return the combined results
+    # Return separate face and speaker detection results
     yield {
         "shots": shots,
-        "faces": faces
+        "faces": faces,
+        "speakers": speakers
     }
 
 if __name__ == "__main__":
