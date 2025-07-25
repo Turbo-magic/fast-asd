@@ -175,7 +175,7 @@ def process(
         result_queue.put(result)
         print("Done pushing video to object detection")
     
-    scene_detection_thread = threading.Thread(target=scene_detection_wrapper, args=(file, scene_detection_result), kwargs={'threshold': 15.0})
+    scene_detection_thread = threading.Thread(target=scene_detection_wrapper, args=(file, scene_detection_result), kwargs={'threshold': 25.0})
     scene_detection_thread.start()
 
     scene_detection_thread.join()
@@ -208,7 +208,7 @@ def process(
             'type': 'face'
         })
         
-        current_time += 1  # Move to next second
+        current_time += 1  # Move to 2 seconds next
     
     # Speaker detection: only first second of each scene
     for segment_index, segment in enumerate(segments):
@@ -662,8 +662,6 @@ def process(
     for speaker_idx, speaker_interval in enumerate(speaker_detection_intervals):
         segment_index = speaker_interval['segment_index']
         
-        print(f"Processing speaker detection {speaker_idx + 1}/{len(speaker_detection_intervals)} for scene {segment_index} [{speaker_interval['start_time']:.2f}s - {speaker_interval['end_time']:.2f}s]")
-        
         if speaker_detection_futures[speaker_idx]["future"] is None:
             print(f"WARNING: No speaker detection future for interval {speaker_idx}, skipping...")
             continue
@@ -690,8 +688,6 @@ def process(
         for frame in speaker_detection_result:
             frame_number = frame["frame_number"]
             speaker_boxes = []
-            
-            print(f"Processing speaker frame {frame_number} with {len(frame.get('boxes', []))} boxes")
             
             # Handle different possible response formats from TalkNet-ASD
             boxes = frame.get('boxes', [])
@@ -741,7 +737,6 @@ def process(
                     "speakers": speaker_boxes,
                     "scene_number": segment_index
                 })
-                print(f"Added {len(speaker_boxes)} speakers for frame {frame_number}")
             else:
                 print(f"No valid speakers found for frame {frame_number}")
     
