@@ -734,7 +734,7 @@ def process(
                 speakers.append({
                     "frame_number": frame_number,
                     "timestamp": round(frame_number / original_video_fps * 1000),
-                    "speakers": speaker_boxes,
+                    "faces": speaker_boxes,
                     "scene_number": segment_index
                 })
             else:
