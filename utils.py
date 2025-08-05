@@ -13,7 +13,7 @@ def get_video_length(path):
     result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return float(result.stdout)
 
-def create_video_segments(file, scene_future, start_time=0, end_time=None, fps=30, original_video_length=None):
+def create_video_segments(file_path, scene_future, start_time=0, end_time=None, fps=30, original_video_length=None):
     scene_outputs = list(scene_future)
 
     video_segments = []
@@ -40,14 +40,14 @@ def create_video_segments(file, scene_future, start_time=0, end_time=None, fps=3
             end_seconds = end_time
             end_frame = int(end_seconds * fps)
 
-        video_segments.append(VideoSegment(path=file.path, start=start_seconds, end=end_seconds, start_frame=start_frame, end_frame=end_frame))
+        video_segments.append(VideoSegment(path=str(file_path), start=start_seconds, end=end_seconds, start_frame=start_frame, end_frame=end_frame))
 
     if len(video_segments) == 0:
         if end_time is None:
             if original_video_length is None:
-                original_video_length = get_video_length(file.path)
+                original_video_length = get_video_length(str(file_path))
             end_time = original_video_length
-        video_segments.append(VideoSegment(path=file.path, start=start_time, end=end_time))
+        video_segments.append(VideoSegment(path=str(file_path), start=start_time, end=end_time))
     return video_segments
 
 def track_boxes(

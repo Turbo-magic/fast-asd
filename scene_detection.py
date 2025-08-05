@@ -1,4 +1,4 @@
-import sieve
+# import sieve  # Removed for local implementation
 from pydantic import BaseModel
 from typing import List
 
@@ -12,7 +12,7 @@ class Scene(BaseModel):
     end_frame: int
 
 def scene_detection(
-    video: sieve.File,
+    video_path,  # Changed from sieve.File to simple path
     threshold: float = 27.0,
     adaptive_threshold: bool = False,
 ) -> Scene:
@@ -28,11 +28,11 @@ def scene_detection(
     from scenedetect.video_manager import VideoManager
 
     import cv2
-    cap = cv2.VideoCapture(video.path)
+    cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
 
-    video_manager = VideoManager([video.path])
+    video_manager = VideoManager([str(video_path)])
     scene_manager = SceneManager()
     if adaptive_threshold:
         scene_manager.add_detector(AdaptiveDetector())
